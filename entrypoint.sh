@@ -1,9 +1,5 @@
 #!/bin/bash
-
-STATUS=0
-
-# remember last error code
-trap 'STATUS=$?' ERR
+set -euo pipefail
 
 # problem matcher must exist in workspace
 cp /error-matcher.json $HOME/repo-sync-error-matcher.json
@@ -18,7 +14,6 @@ REPO_TYPE="$INPUT_TYPE"
 FILE_PATH="$INPUT_PATH"
 GITHUB_TOKEN="$INPUT_TOKEN"
 echo "Repo type    : $REPO_TYPE"
-FILES=($RAW_FILES)
 echo "Path         : $FILE_PATH"
 GIT_EMAIL="$INPUT_GIT_EMAIL"
 echo "Git email       : $GIT_EMAIL"
@@ -27,12 +22,12 @@ echo "Git username    : $GIT_USERNAME"
 
 # Infer file path if not provided
 if [ -z "$FILE_PATH" ]; then
-    if [ -f "package.json" ]; then
+    if [ -f "metadata.json" ]; then
+        FILE_PATH="metadata.json"
+    elif [ -f "package.json" ]; then
         FILE_PATH="package.json"
     elif [ -f "pyproject.toml" ]; then
         FILE_PATH="pyproject.toml"
-    elif [ -f "metadata.json" ]; then
-        FILE_PATH="metadata.json"
     elif [ -f *.csproj ]; then
         FILE_PATH=$(ls *.csproj | head -n 1)
     else
@@ -110,25 +105,9 @@ if [ "$REPO_TYPE" == "npm" ]; then
     echo "Repo type: NPM"
     # read in the variables from package.json
     echo "Parsing ${FILE_PATH}"
-    DESCRIPTION=`jq -r '.description' ${FILE_PATH}`
-    WEBSITE=`jq -r '.homepage' ${FILE_PATH}`
-    TOPICS=`jq '.keywords' ${FILE_PATH}`
-
-elif [ "$REPO_TYPE" == "python" ]; then
-    echo "Repo type: Python"
-    # read in the variables from pyproject.toml
-    echo "Parsing ${FILE_PATH}"
-    DESCRIPTION=`yq e '.tool.poetry.description' ${FILE_PATH}`
-    WEBSITE=`yq e '.tool.poetry.homepage' ${FILE_PATH}`
-    # yq responds with `null` if nothing exists, but we want to return an empty array
-    TOPICS=$(
-        result=$(yq -ojson eval '.tool.poetry.keywords' pyproject.toml)
-        if [ "$result" = "null" ]; then
-            echo "[]"
-        else
-            echo $result
-        fi
-    )
+    DESCRIPTION=$(jq -r '.description' ${FILE_PATH})
+    WEBSITE=$(jq -r '.homepage' ${FILE_PATH})
+    TOPICS=$(jq '.keywords' ${FILE_PATH})
 
 elif [ "$REPO_TYPE" == "nuget" ]; then
     echo "Repo type: NuGet"
@@ -136,17 +115,16 @@ elif [ "$REPO_TYPE" == "nuget" ]; then
     WEBSITE=$(grep -oP '(?<=<RepositoryUrl>)[^<]+' "${FILE_PATH}")
     TOPICS_STRING=$(grep -oP '(?<=<PackageTags>)[^<]+' "${FILE_PATH}")
     TOPICS_ARRAY=$(echo $TOPICS_STRING | tr ";" "\n")
-    TOPICS=`printf '%s\n' "${TOPICS_ARRAY[@]}" | jq -R . | jq -s .`
+    TOPICS=$(printf '%s\n' "${TOPICS_ARRAY[@]}" | jq -R . | jq --no-progress-meter .)
 
 elif [ "$REPO_TYPE" == "python" ]; then
     echo "Repo type: Python"
     # read in the variables from pyproject.toml
     echo "Parsing ${FILE_PATH}"
-    DESCRIPTION=`yq e '.tool.poetry.description' ${FILE_PATH}`
-    WEBSITE=`yq e '.tool.poetry.homepage' ${FILE_PATH}`
-    # yq responds with `null` if nothing exists, but we want to return an empty array
+    DESCRIPTION=$(yq e '.tool.poetry.description // .project.description' ${FILE_PATH})
+    WEBSITE=$(yq e '.tool.poetry.homepage // .project.urls.Repository' ${FILE_PATH})
     TOPICS=$(
-        result=$(yq -ojson eval '.tool.poetry.keywords' pyproject.toml)
+        result=$(yq -ojson eval '.tool.poetry.keywords // .project.keywords' ${FILE_PATH})
         if [ "$result" = "null" ]; then
             echo "[]"
         else
@@ -158,48 +136,51 @@ else
     exit 1
 fi
 
+if [ "$DESCRIPTION" = "null" ] && [ "$DESCRIPTION" = "" ] && [ "$WEBSITE" = "null" ] && [ "$WEBSITE" = "" ] && [ "$TOPICS" = "null" ] && [ "$TOPICS" = "" ]; then
+    echo "Error: No updates found - description, website and topics are all empty"
+    exit 1
+fi
+
 # update the description
 echo " "
 echo "Description: ${DESCRIPTION}"
-if [ "$DESCRIPTION" != null -a "$DESCRIPTION" != "" ]; then
+if [ "$DESCRIPTION" != null ] && [ "$DESCRIPTION" != "" ]; then
     echo "Updating description for [${GITHUB_REPOSITORY}]"
     jq -n --arg description "$DESCRIPTION" '{description:$description}'
-    jq -n --arg description "$DESCRIPTION" '{description:$description}' |  curl -d @- \
+    jq -n --arg description "$DESCRIPTION" '{description:$description}' | curl --no-progress-meter -d @- \
         -X PATCH \
         -H "Accept: application/vnd.github.v3+json" \
         -H "Content-Type: application/json" \
         -u ${USERNAME}:${GITHUB_TOKEN} \
-        --silent \
+        --fail \
         ${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}
 fi
 
 # update the homepage
 echo " "
 echo "Website: ${WEBSITE}"
-if [ "$WEBSITE" != null -a "$WEBSITE" != "" ]; then
+if [ "$WEBSITE" != null ] && [ "$WEBSITE" != "" ]; then
     echo "Updating homepage for [${GITHUB_REPOSITORY}]"
     jq -n --arg homepage "$WEBSITE" '{homepage:$homepage}'
-    jq -n --arg homepage "$WEBSITE" '{homepage:$homepage}' | curl -d @- \
+    jq -n --arg homepage "$WEBSITE" '{homepage:$homepage}' | curl --no-progress-meter -d @- \
         -X PATCH \
         -H "Accept: application/vnd.github.v3+json" \
         -H "Content-Type: application/json" \
         -u ${USERNAME}:${GITHUB_TOKEN} \
-        --silent \
+        --fail \
         ${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}
 fi
 
 # update the topics
 echo " "
 echo "Topics: ${TOPICS}"
-if [ "$TOPICS" != null -a "$TOPICS" != "" ]; then
+if [ "$TOPICS" != null ] && [ "$TOPICS" != "" ]; then
     echo "Updating topics for [${GITHUB_REPOSITORY}]"
     jq -n --argjson topics "$TOPICS" '{names:$topics}'
-    jq -n --argjson topics "$TOPICS" '{names:$topics}' | curl -d @- \
+    jq -n --argjson topics "$TOPICS" '{names:$topics}' | curl --no-progress-meter -d @- \
         -X PUT \
         -H "Accept: application/vnd.github.mercy-preview+json" \
         -u ${USERNAME}:${GITHUB_TOKEN} \
-        --silent \
+        --fail \
         ${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/topics
 fi
-
-exit $STATUS
