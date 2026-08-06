@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Fetching Local Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
 
       - name: Repo Sync
         uses: iloveitaly/github-actions-metadata-sync@v1
